@@ -47,6 +47,7 @@ import static org.elasticsearch.index.query.QueryBuilders.termQuery;
 import static org.elasticsearch.index.query.QueryBuilders.moreLikeThisQuery;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.*;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.isOneOf;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
@@ -98,6 +99,76 @@ public class MoreLikeThisIT extends ESIntegTestCase {
         assertHitCount(response, 0l);
     }
 
+
+    @Test
+    public void testMoreLikeThisWithAliasesAndTwoIndices() throws Exception {
+        logger.info("Creating index test");
+        assertAcked(prepareCreate("test").addMapping("type1",
+                jsonBuilder().startObject().startObject("type1").startObject("properties")
+                        .startObject("text").field("type", "string").endObject()
+                        .endObject().endObject().endObject()));
+        assertAcked(prepareCreate("test1").addMapping("type1",
+                jsonBuilder().startObject().startObject("type1").startObject("properties")
+                        .startObject("text").field("type", "string").endObject()
+                        .endObject().endObject().endObject()));
+        logger.info("Creating aliases alias release");
+        client().admin().indices().aliases(indexAliasesRequest().addAlias("lucene", "test")).actionGet();
+        client().admin().indices().aliases(indexAliasesRequest().addAlias("elastic", "test1")).actionGet();
+        client().admin().indices().aliases(indexAliasesRequest().addAlias("all", "test", "test1")).actionGet();
+
+        logger.info("Running Cluster Health");
+        assertThat(ensureGreen(), equalTo(ClusterHealthStatus.GREEN));
+
+        logger.info("Indexing...");
+        client().index(indexRequest("test").type("type1").id("1").source(jsonBuilder().startObject().field("text", "lucene beta").endObject())).actionGet();
+        client().index(indexRequest("test").type("type1").id("2").source(jsonBuilder().startObject().field("text", "lucene release").endObject())).actionGet();
+        client().index(indexRequest("test1").type("type1").id("3").source(jsonBuilder().startObject().field("text", "elasticsearch beta").endObject())).actionGet();
+        client().index(indexRequest("test1").type("type1").id("4").source(jsonBuilder().startObject().field("text", "elasticsearch release").endObject())).actionGet();
+        client().admin().indices().refresh(refreshRequest()).actionGet();
+
+        SearchResponse response;
+
+        logger.info("Running moreLikeThis on lucene shard");
+        response = client().prepareSearch("lucene").setQuery(
+                new MoreLikeThisQueryBuilder().addItem(new Item("test", "type1", "1")).minTermFreq(1).minDocFreq(1)).get();
+        assertHitCount(response, 1l);
+        assertThat(response.getHits().getAt(0).id(), equalTo("2"));
+
+        logger.info("Running moreLikeThis on elastic shard");
+        response = client().prepareSearch("elastic").setQuery(
+                new MoreLikeThisQueryBuilder().addItem(new Item("test1", "type1", "3")).minTermFreq(1).minDocFreq(1)).get();
+        assertHitCount(response, 1l);
+        assertThat(response.getHits().getAt(0).id(), equalTo("4"));
+
+        logger.info("Running moreLikeThis on alias with node client");
+        response = internalCluster().clientNodeClient().prepareSearch("lucene").setQuery(
+                new MoreLikeThisQueryBuilder().addItem(new Item("test", "type1", "1")).minTermFreq(1).minDocFreq(1)).get();
+        assertHitCount(response, 1l);
+        assertThat(response.getHits().getAt(0).id(), equalTo("2"));
+
+        /*
+         * This should return all documents with "lucene" or "beta", so docs
+          * 1,2 and 3
+         */
+        logger.info("Running moreLikeThis on all alias with like text");
+        response = client().prepareSearch("all").setQuery(
+                new MoreLikeThisQueryBuilder().like("lucene beta").minTermFreq(1).minDocFreq(1)).get();
+        assertHitCount(response, 3l);
+        assertThat(response.getHits().getAt(0).id(), isOneOf("1", "2", "3"));
+        assertThat(response.getHits().getAt(1).id(), isOneOf("1", "2", "3"));
+        assertThat(response.getHits().getAt(2).id(), isOneOf("1", "2", "3"));
+
+        logger.info("Running moreLikeThis on all alias with id query");
+        response = client().prepareSearch("all").setQuery(
+                new MoreLikeThisQueryBuilder()
+                        .addItem(new Item("test", "type1", "1"))
+                        .minTermFreq(1)
+                        .minDocFreq(1)).get();
+        assertHitCount(response, 2l);
+        assertThat(response.getHits().getAt(0).id(), isOneOf("2", "3"));
+        assertThat(response.getHits().getAt(1).id(), isOneOf("2", "3"));
+
+    }
 
     @Test
     public void testMoreLikeThisWithAliases() throws Exception {
